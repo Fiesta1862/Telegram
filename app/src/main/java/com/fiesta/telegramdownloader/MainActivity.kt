@@ -276,10 +276,19 @@ private object MediaResolver {
             if (segments.firstOrNull() == "joinchat")
                 throw IllegalArgumentException("Private invite links aren't supported.")
 
-            if (segments.size >= 2) {
+            // Public channel post links: /<username>/<message_id>.
+            // Only accept a direct media URL exposed by Telegram's public page.
+            if (segments.size == 2 &&
+                segments[0].matches(Regex("[A-Za-z0-9_]{5,}")) &&
+                segments[1].toLongOrNull() != null
+            ) {
+                resolvePublicTelegramPost(segments[0], segments[1], input)?.let { return it }
                 throw IllegalArgumentException(
-                    "Telegram post pages are not direct video links. Use a direct video URL or Telegram's built-in save/share option when available. Protected content is not supported."
+                    "This public post does not expose a downloadable video URL. It may be a protected post, an unsupported media type, or a player-only page."
                 )
+            }
+            if (segments.size >= 2) {
+                throw IllegalArgumentException("Unsupported Telegram link. Use a public channel post or a direct video URL.")
             }
         }
 
@@ -302,6 +311,35 @@ private object MediaResolver {
             val html = connection.inputStream.bufferedReader().use { it.readText().take(2_000_000) }
             return extractVideoUrl(html, finalUrl)
                 ?: throw IllegalArgumentException("No public downloadable video was found. Some posts only play inside their original app.")
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun resolvePublicTelegramPost(username: String, messageId: String, originalUrl: String): String? {
+        val pageUrl = "https://t.me/$username/$messageId"
+        val connection = (URL(pageUrl).openConnection() as HttpURLConnection).apply {
+            instanceFollowRedirects = true
+            connectTimeout = 12_000
+            readTimeout = 15_000
+            setRequestProperty("User-Agent", userAgent)
+            setRequestProperty("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
+            setRequestProperty("Referer", originalUrl)
+        }
+        try {
+            connection.connect()
+            if (connection.responseCode !in 200..299) return null
+            if (!connection.contentType.orEmpty().lowercase().contains("html")) return null
+            val html = connection.inputStream.bufferedReader().use { it.readText().take(2_000_000) }
+
+            // Accept only a normal direct video source explicitly exposed in the public page.
+            // Do not decode protected payloads, call private APIs, or evade Telegram restrictions.
+            val videoTag = Regex("""(?is)<video\b[^>]*>""").find(html)?.value
+            val raw = videoTag?.let {
+                Regex("""(?i)\b(?:src|data-src)=["']([^"']+)["']""").find(it)?.groupValues?.getOrNull(1)
+            } ?: Regex("""(?is)<source\b[^>]*\bsrc=["']([^"']+)["']""")
+                .find(html)?.groupValues?.getOrNull(1)
+            return raw?.let { resolveUrl(it, connection.url.toString()) }
         } finally {
             connection.disconnect()
         }
