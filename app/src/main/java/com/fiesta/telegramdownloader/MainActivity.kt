@@ -153,8 +153,7 @@ private fun TeleSaveScreen(initialLink: String) {
                 }
 
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Save videos.
-Keep it simple.", fontSize = 34.sp, lineHeight = 39.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                    Text("Save videos.\nKeep it simple.", fontSize = 34.sp, lineHeight = 39.sp, fontWeight = FontWeight.Bold, color = Color.White)
                     Text("Share a public Telegram post or paste a direct video link.", color = Muted, fontSize = 14.sp)
                 }
 
