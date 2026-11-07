@@ -276,16 +276,9 @@ private object MediaResolver {
             if (segments.firstOrNull() == "joinchat")
                 throw IllegalArgumentException("Private invite links aren't supported.")
 
-            // Public post links use /<channel_username>/<message_id>.
-            // Ask Telegram's public post embed for its rendered media markup.
-            if (segments.size == 2 && segments[0] != "s" &&
-                segments[0].matches(Regex("[A-Za-z0-9_]{5,}")) &&
-                segments[1].toLongOrNull() != null
-            ) {
-                val publicVideo = resolveTelegramPublicPost(segments[0], segments[1], input)
-                if (publicVideo != null) return publicVideo
+            if (segments.size >= 2) {
                 throw IllegalArgumentException(
-                    "Telegram shows this public post, but it doesn't expose a downloadable video. The post may use protected media or an embedded player."
+                    "Telegram post pages are not direct video links. Use a direct video URL or Telegram's built-in save/share option when available. Protected content is not supported."
                 )
             }
         }
@@ -312,50 +305,6 @@ private object MediaResolver {
         } finally {
             connection.disconnect()
         }
-    }
-
-    private fun resolveTelegramPublicPost(username: String, messageId: String, originalUrl: String): String? {
-        val embedUrl = "https://t.me/$username/$messageId?embed=1&mode=tme"
-        val connection = (URL(embedUrl).openConnection() as HttpURLConnection).apply {
-            instanceFollowRedirects = true
-            connectTimeout = 12_000
-            readTimeout = 15_000
-            setRequestProperty("User-Agent", userAgent)
-            setRequestProperty("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
-            setRequestProperty("Referer", originalUrl)
-        }
-        try {
-            connection.connect()
-            if (connection.responseCode !in 200..299) return null
-            val type = connection.contentType.orEmpty().lowercase()
-            if (!type.contains("html")) return null
-            val html = connection.inputStream.bufferedReader().use { it.readText().take(2_000_000) }
-            return extractTelegramVideoUrl(html, connection.url.toString())
-        } finally {
-            connection.disconnect()
-        }
-    }
-
-    private fun extractTelegramVideoUrl(html: String, pageUrl: String): String? {
-        // Telegram's public post embed places media in a video element inside
-        // the tgme_widget_message_video_player block.
-        val playerBlocks = Regex(
-            """(?is)<a\b[^>]*class=["'][^"']*tgme_widget_message_video_player[^"']*["'][^>]*>.*?</a>"""
-        ).findAll(html).map { it.value }.toList()
-        for (block in playerBlocks) {
-            val videoTag = Regex("""(?is)<video\b[^>]*>""").find(block)?.value
-            val raw = videoTag?.let {
-                Regex("""(?i)\b(?:src|data-src)=["']([^"']+)["']""").find(it)?.groupValues?.getOrNull(1)
-            } ?: Regex("""(?is)<source\b[^>]*\bsrc=["']([^"']+)["']""")
-                .find(block)?.groupValues?.getOrNull(1)
-            if (!raw.isNullOrBlank()) {
-                val resolved = resolveUrl(raw, pageUrl)
-                if (resolved != null) return resolved
-            }
-        }
-        // Fallback for Telegram markup variants where the video tag is not
-        // wrapped in the expected player anchor.
-        return extractVideoUrl(html, pageUrl)
     }
 
     private fun extractVideoUrl(html: String, pageUrl: String): String? {
