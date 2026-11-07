@@ -334,10 +334,10 @@ private object MediaResolver {
 
             // Accept only a normal direct video source explicitly exposed in the public page.
             // Do not decode protected payloads, call private APIs, or evade Telegram restrictions.
-            val videoTag = Regex("""(?is)<video\\b[^>]*>""").find(html)?.value
+            val videoTag = Regex("""(?is)<video\b[^>]*>""").find(html)?.value
             val raw = videoTag?.let {
-                Regex("""(?i)\\b(?:src|data-src)=["']([^"']+)["']""").find(it)?.groupValues?.getOrNull(1)
-            } ?: Regex("""(?is)<source\\b[^>]*\\bsrc=["']([^"']+)["']""")
+                Regex("""(?i)\b(?:src|data-src)=["']([^"']+)["']""").find(it)?.groupValues?.getOrNull(1)
+            } ?: Regex("""(?is)<source\b[^>]*\bsrc=["']([^"']+)["']""")
                 .find(html)?.groupValues?.getOrNull(1)
             return raw?.let { resolveUrl(it, connection.url.toString()) }
         } finally {
