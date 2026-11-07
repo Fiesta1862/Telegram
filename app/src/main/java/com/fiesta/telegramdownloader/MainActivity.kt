@@ -267,12 +267,29 @@ private object MediaResolver {
             ?: throw IllegalArgumentException("That doesn't look like a valid URL.")
         if (uri.scheme !in listOf("http", "https") || uri.host.isNullOrBlank())
             throw IllegalArgumentException("Only HTTP and HTTPS links are supported.")
+
         val host = uri.host.lowercase()
-        if (host == "t.me" || host.endsWith(".t.me")) {
-            val path = uri.path.orEmpty()
-            if (path.startsWith("/c/") || path.startsWith("/+") || path.startsWith("/joinchat/"))
+        if (host == "t.me" || host == "www.t.me" || host == "telegram.me" || host == "www.telegram.me") {
+            val segments = uri.path.orEmpty().split("/").filter { it.isNotBlank() }
+            if (segments.firstOrNull() == "c" || segments.firstOrNull() == "+")
                 throw IllegalArgumentException("Private channels and invite-only links aren't supported.")
+            if (segments.firstOrNull() == "joinchat")
+                throw IllegalArgumentException("Private invite links aren't supported.")
+
+            // Public post links use /<channel_username>/<message_id>.
+            // Ask Telegram's public post embed for its rendered media markup.
+            if (segments.size == 2 && segments[0] != "s" &&
+                segments[0].matches(Regex("[A-Za-z0-9_]{5,}")) &&
+                segments[1].toLongOrNull() != null
+            ) {
+                val publicVideo = resolveTelegramPublicPost(segments[0], segments[1], input)
+                if (publicVideo != null) return publicVideo
+                throw IllegalArgumentException(
+                    "Telegram shows this public post, but it doesn't expose a downloadable video. The post may use protected media or an embedded player."
+                )
+            }
         }
+
         val path = uri.path.orEmpty().lowercase()
         if (listOf(".mp4", ".m4v", ".mov", ".webm", ".mkv").any { path.endsWith(it) }) return uri.toString()
 
@@ -280,7 +297,7 @@ private object MediaResolver {
             instanceFollowRedirects = true
             connectTimeout = 12_000
             readTimeout = 15_000
-            setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 Chrome/130 Mobile Safari/537.36")
+            setRequestProperty("User-Agent", userAgent)
             setRequestProperty("Accept", "text/html,video/*;q=0.9,*/*;q=0.8")
         }
         try {
@@ -290,21 +307,81 @@ private object MediaResolver {
             if (type.startsWith("video/")) return finalUrl
             if (!type.contains("html")) throw IllegalArgumentException("The link doesn't return a video or a readable public webpage.")
             val html = connection.inputStream.bufferedReader().use { it.readText().take(2_000_000) }
-            val candidates = listOf(
-                Regex("""(?i)<meta[^>]+(?:property|name)=["'](?:og:video(?::url)?|twitter:player:stream)["'][^>]+content=["']([^"']+)["']"""),
-                Regex("""(?i)<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["'](?:og:video(?::url)?|twitter:player:stream)["']"""),
-                Regex("""(?i)<source[^>]+src=["']([^"']+)["']"""),
-                Regex("""(?i)<video[^>]+src=["']([^"']+)["']""")
-            )
-            for (pattern in candidates) {
-                val match = pattern.find(html)?.groupValues?.getOrNull(1)?.replace("&amp;", "&") ?: continue
-                val resolved = runCatching { URL(URL(finalUrl), match).toString() }.getOrNull() ?: continue
-                val mediaUri = runCatching { URI(resolved) }.getOrNull() ?: continue
-                if (mediaUri.scheme in listOf("http", "https") && !mediaUri.host.isNullOrBlank()) return resolved
-            }
-            throw IllegalArgumentException("No public downloadable video was found. Some Telegram posts only play inside Telegram.")
+            return extractVideoUrl(html, finalUrl)
+                ?: throw IllegalArgumentException("No public downloadable video was found. Some posts only play inside their original app.")
         } finally {
             connection.disconnect()
         }
     }
+
+    private fun resolveTelegramPublicPost(username: String, messageId: String, originalUrl: String): String? {
+        val embedUrl = "https://t.me/$username/$messageId?embed=1&mode=tme"
+        val connection = (URL(embedUrl).openConnection() as HttpURLConnection).apply {
+            instanceFollowRedirects = true
+            connectTimeout = 12_000
+            readTimeout = 15_000
+            setRequestProperty("User-Agent", userAgent)
+            setRequestProperty("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
+            setRequestProperty("Referer", originalUrl)
+        }
+        try {
+            connection.connect()
+            if (connection.responseCode !in 200..299) return null
+            val type = connection.contentType.orEmpty().lowercase()
+            if (!type.contains("html")) return null
+            val html = connection.inputStream.bufferedReader().use { it.readText().take(2_000_000) }
+            return extractTelegramVideoUrl(html, connection.url.toString())
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun extractTelegramVideoUrl(html: String, pageUrl: String): String? {
+        // Telegram's public post embed places media in a video element inside
+        // the tgme_widget_message_video_player block.
+        val playerBlocks = Regex(
+            """(?is)<a\b[^>]*class=["'][^"']*tgme_widget_message_video_player[^"']*["'][^>]*>.*?</a>"""
+        ).findAll(html).map { it.value }.toList()
+        for (block in playerBlocks) {
+            val videoTag = Regex("""(?is)<video\b[^>]*>""").find(block)?.value
+            val raw = videoTag?.let {
+                Regex("""(?i)\b(?:src|data-src)=["']([^"']+)["']""").find(it)?.groupValues?.getOrNull(1)
+            } ?: Regex("""(?is)<source\b[^>]*\bsrc=["']([^"']+)["']""")
+                .find(block)?.groupValues?.getOrNull(1)
+            if (!raw.isNullOrBlank()) {
+                val resolved = resolveUrl(raw, pageUrl)
+                if (resolved != null) return resolved
+            }
+        }
+        // Fallback for Telegram markup variants where the video tag is not
+        // wrapped in the expected player anchor.
+        return extractVideoUrl(html, pageUrl)
+    }
+
+    private fun extractVideoUrl(html: String, pageUrl: String): String? {
+        val patterns = listOf(
+            Regex("""(?is)<video\b[^>]*\bsrc=["']([^"']+)["']"""),
+            Regex("""(?is)<video\b[^>]*\bdata-src=["']([^"']+)["']"""),
+            Regex("""(?is)<source\b[^>]*\bsrc=["']([^"']+)["']"""),
+            Regex("""(?is)<meta[^>]+(?:property|name)=["'](?:og:video(?::url)?|twitter:player:stream)["'][^>]+content=["']([^"']+)["']"""),
+            Regex("""(?is)<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["'](?:og:video(?::url)?|twitter:player:stream)["']""")
+        )
+        for (pattern in patterns) {
+            val raw = pattern.find(html)?.groupValues?.getOrNull(1) ?: continue
+            val resolved = resolveUrl(raw, pageUrl) ?: continue
+            return resolved
+        }
+        return null
+    }
+
+    private fun resolveUrl(raw: String, pageUrl: String): String? {
+        val decoded = raw.replace("&amp;", "&").replace("&#38;", "&")
+        val resolved = runCatching { URL(URL(pageUrl), decoded).toString() }.getOrNull() ?: return null
+        val mediaUri = runCatching { URI(resolved) }.getOrNull() ?: return null
+        if (mediaUri.scheme !in listOf("http", "https") || mediaUri.host.isNullOrBlank()) return null
+        return resolved
+    }
+
+    private const val userAgent =
+        "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 Chrome/130 Mobile Safari/537.36"
 }
