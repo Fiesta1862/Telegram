@@ -36,6 +36,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -256,9 +257,10 @@ private fun GlassButton(label: String, icon: androidx.compose.ui.graphics.vector
     }
 }
 
-private fun Modifier.graphicsScale(scale: Float) = this.then(
-    Modifier
-)
+private fun Modifier.graphicsScale(scale: Float) = graphicsLayer {
+    scaleX = scale
+    scaleY = scale
+}
 
 private object MediaResolver {
     fun resolve(input: String): String {
